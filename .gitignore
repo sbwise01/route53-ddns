@@ -8,6 +8,10 @@
 *.so
 *.dylib
 
+# Built application binaries
+/route53-ddns
+/r53ddns
+
 # Test binary, built with `go test -c`
 *.test
 
