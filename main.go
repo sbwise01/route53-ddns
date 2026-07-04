@@ -8,8 +8,8 @@ import (
 )
 
 func main() {
-	fmt.Println("Route53 Dynamic DNS client Version", version)
-	fmt.Println("Git Repo:", gitrepo)
+	fmt.Printf("route53-ddns %s\n", version)
+	fmt.Printf("source: %s\n", gitrepo)
 
 	domain := flag.String("domain", "", "Domain name e.g. example.com")
 	host := flag.String("host", "", "Subdomain or hostname e.g. www. Use '@' or leave empty for the apex record.")
