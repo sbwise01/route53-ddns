@@ -15,7 +15,7 @@ func (err *CustomError) Error() string {
 }
 
 var (
-	version             string        = "1.0.0-go1.23"
+	version             string        = "dev"
 	defaultPollInterval time.Duration = 15 * time.Minute // Default poll interval
 	gitrepo             string        = "https://github.com/sbwise01/route53-ddns"
 	httpTimeout         time.Duration = 30 * time.Second

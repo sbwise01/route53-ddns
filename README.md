@@ -91,15 +91,37 @@ kubectl -n route53-ddns logs -f deploy/route53-ddns
 
 ## Build your own image
 
+The release version lives in `VERSION` (semver `X.Y.Z`). CI reads it on merge to
+`main`, tags the repo, and pushes `sbwise/route53-ddns:<VERSION>`.
+
 ```
-docker build --build-arg VERSION=1.0.0 -t sbwise/route53-ddns .
+docker build --build-arg VERSION="$(cat VERSION)" -t sbwise/route53-ddns .
 ```
 
 Or build/push multi-arch images:
 
 ```
-bash docker-build.sh 1.0.0
+bash docker-build.sh "$(cat VERSION)"
 ```
+
+## CI/CD
+
+PRs that touch Go sources, the Dockerfile, or `VERSION` run a Docker test build
+and bump `VERSION` from the PR title (Conventional Commits: `feat` → minor,
+everything else → patch, `!` / `BREAKING CHANGE` → major). The bot commits the
+bump with `[skip ci]`.
+
+On merge to `main`, release tags `VERSION` and pushes the image via OIDC →
+`dockerhub-role` → SSM (no GitHub Docker Hub secret).
+
+Before the first PR after adding CI, seed the baseline tag on `main`:
+
+```
+git tag 2.0.0 origin/main && git push origin 2.0.0
+```
+
+Flux in `wise-k8s` tracks `sbwise/route53-ddns` with semver `>=2.0.0` and bumps
+the cluster overlay automatically.
 
 ## Build locally
 

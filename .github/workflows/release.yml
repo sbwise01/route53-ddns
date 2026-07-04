@@ -1,0 +1,117 @@
+name: Release (tag + push image)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "container-entrypoint.sh"
+      - "VERSION"
+
+permissions:
+  id-token: write # AWS OIDC (assume dockerhub-role)
+  contents: write # push the git tag
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-2
+  DOCKERHUB_ROLE_ARN: arn:aws:iam::712671171381:role/dockerhub-role
+  IMAGE: sbwise/route53-ddns
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags
+
+      # 1. VERSION is the single source of truth for the release tag.
+      - name: Read version from VERSION
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python3 .github/scripts/version.py VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $version"
+
+      # 2. If this version is already tagged, it was released or burned. Fail so a
+      #    new bump PR must be merged (versions are never reused).
+      - name: Guard against existing tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --quiet
+          if git tag --list "$VERSION" | grep -qx "$VERSION"; then
+            echo "::error::tag '$VERSION' already exists — already released or burned. Merge a new version bump."
+            exit 1
+          fi
+
+      # 3. Create + push the git tag first. This reserves the version: if the
+      #    build/push below fails, the tag remains and the version is burned.
+      - name: Create & push git tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. Secrets: OIDC -> dockerhub-role -> SSM (no long-lived GitHub secret).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DOCKERHUB_ROLE_ARN }}
+          role-session-name: gha-dockerhub-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch Docker Hub credentials from SSM
+        run: |
+          set -euo pipefail
+          username="$(aws ssm get-parameter \
+            --name /dockerhub/api/username \
+            --with-decryption \
+            --query Parameter.Value \
+            --output text)"
+          token="$(aws ssm get-parameter \
+            --name /dockerhub/api/token \
+            --with-decryption \
+            --query Parameter.Value \
+            --output text)"
+          echo "::add-mask::${username}"
+          echo "::add-mask::${token}"
+          echo "DOCKERHUB_USERNAME=${username}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_TOKEN=${token}" >> "$GITHUB_ENV"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      # 5. Build + push sbwise/route53-ddns:<VERSION>.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,12 +1,10 @@
 FROM golang:1.24-alpine3.21 AS build
-ARG OS
-ARG ARCH
+ARG VERSION=dev
 COPY . /build/
 WORKDIR /build
-RUN go mod download && go build -o r53ddns
+RUN go mod download && go build -ldflags "-X main.version=${VERSION}" -o r53ddns
 
 FROM alpine:3.21
-ARG VERSION
 ARG user=r53ddns
 ARG group=r53ddns
 ARG uid=1000
