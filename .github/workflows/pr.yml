@@ -1,0 +1,135 @@
+name: PR checks & version bump
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "container-entrypoint.sh"
+      - "VERSION"
+
+permissions:
+  contents: write # commit the VERSION bump back to the PR branch
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-bump:
+    name: Verify & bump
+    runs-on: ubuntu-latest
+    # Bot bump commits use [skip ci] so the workflow is not triggered at all; the
+    # github.actor guard is a backup if a run is still queued.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+        && github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Ensure branch is up to date with main
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags --quiet
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            echo "::error::Branch is behind 'main'. Merge/rebase 'main' and push again."
+            exit 1
+          fi
+
+      - name: Verify main's VERSION is released (tagged)
+        id: base
+        run: |
+          set -euo pipefail
+          git show origin/main:VERSION > /tmp/main-VERSION
+          base_version="$(python3 .github/scripts/version.py /tmp/main-VERSION)"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
+          echo "main VERSION: $base_version"
+          if ! git tag --list "$base_version" | grep -qx "$base_version"; then
+            echo "::error::main VERSION '$base_version' has no matching git tag. Seed once: git tag $base_version origin/main && git push origin $base_version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$base_version" origin/main; then
+            echo "::error::git tag '$base_version' is not part of 'main' history."
+            exit 1
+          fi
+
+      - name: Validate PR title & determine bump level
+        id: bump
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+          if [[ ! "$PR_TITLE" =~ ^(${types})(\([a-zA-Z0-9._/-]+\))?(!)?:[[:space:]].+ ]]; then
+            echo "::error::PR title is not a valid Conventional Commit: '$PR_TITLE'"
+            echo "Examples: 'feat: add retry', 'fix(route53): handle empty zone', 'feat!: breaking change'"
+            exit 1
+          fi
+          type="${BASH_REMATCH[1]}"
+          bang="${BASH_REMATCH[3]}"
+          if [[ "$bang" == "!" ]] || grep -qE '^BREAKING CHANGE:' <<< "${PR_BODY:-}"; then
+            level=major
+          elif [[ "$type" == "feat" ]]; then
+            level=minor
+          else
+            level=patch
+          fi
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+          echo "Bump level: $level"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker test build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            VERSION=dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Compute next version & bump VERSION
+        # [skip ci] on the bump commit prevents re-triggering this workflow.
+        env:
+          BASE_VERSION: ${{ steps.base.outputs.base_version }}
+          LEVEL: ${{ steps.bump.outputs.level }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::base version '$BASE_VERSION' is not semver X.Y.Z"; exit 1
+          fi
+          MA="${BASH_REMATCH[1]}"; MI="${BASH_REMATCH[2]}"; PA="${BASH_REMATCH[3]}"
+          case "$LEVEL" in
+            major) MA=$((MA + 1)); MI=0; PA=0 ;;
+            minor) MI=$((MI + 1)); PA=0 ;;
+            patch) PA=$((PA + 1)) ;;
+          esac
+          next="${MA}.${MI}.${PA}"
+          echo "Next version: $next"
+          if git tag --list "$next" | grep -qx "$next"; then
+            echo "::error::version '$next' is already tagged (released or burned). Update your branch with 'main' and re-run."
+            exit 1
+          fi
+          current="$(python3 .github/scripts/version.py VERSION)"
+          if [[ "$current" == "$next" ]]; then
+            echo "VERSION already at $next — no commit needed."
+            exit 0
+          fi
+          printf '%s\n' "$next" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore(release): set version to ${next} [skip ci]"
+          git push origin "HEAD:${HEAD_REF}"
