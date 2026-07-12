@@ -20,21 +20,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  escape-bot-trigger:
+    name: Escape Bot Trigger
+    runs-on: ubuntu-latest
+    outputs:
+      bot_trigger: ${{ steps.escape-bot-trigger.outputs.bot_trigger }}
+    # Same-repo PRs only. Fork PRs can't be granted write on the branch to push
+    # the bump (and can't assume AWS roles), matching wise-k8s/terraform-plan.yml.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Escape Bot Trigger
+        id: escape-bot-trigger
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          if [ $GITHUB_ACTOR == 'github-actions[bot]' ]; then
+            echo "Workflow triggered by bot. Skipping."
+            echo "bot_trigger=true" >> $GITHUB_OUTPUT
+          else
+            echo "Workflow triggered by human. Continuing."
+            echo "bot_trigger=false" >> $GITHUB_OUTPUT
+          fi
+
   verify-and-bump:
     name: Verify & bump
     runs-on: ubuntu-latest
-    # Bot bump commits use [skip ci] so the workflow is not triggered at all; the
-    # github.actor guard is a backup if a run is still queued.
+    needs: escape-bot-trigger
+    # Same-repo PRs only. Fork PRs can't be granted write on the branch to push
+    # the bump (and can't assume AWS roles), matching wise-k8s/terraform-plan.yml.
     if: github.event.pull_request.head.repo.full_name == github.repository
-        && github.actor != 'github-actions[bot]'
     steps:
       - name: Checkout PR branch
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
       - name: Ensure branch is up to date with main
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         run: |
           set -euo pipefail
           git fetch origin main --tags --quiet
@@ -44,6 +68,7 @@ jobs:
           fi
 
       - name: Verify main's VERSION is released (tagged)
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         id: base
         run: |
           set -euo pipefail
@@ -61,6 +86,7 @@ jobs:
           fi
 
       - name: Validate PR title & determine bump level
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         id: bump
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -86,9 +112,11 @@ jobs:
           echo "Bump level: $level"
 
       - name: Set up Buildx
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Docker test build
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -100,7 +128,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Compute next version & bump VERSION
-        # [skip ci] on the bump commit prevents re-triggering this workflow.
+        if: needs.escape-bot-trigger.outputs.bot_trigger != 'true'
         env:
           BASE_VERSION: ${{ steps.base.outputs.base_version }}
           LEVEL: ${{ steps.bump.outputs.level }}
@@ -131,5 +159,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION
-          git commit -m "chore(release): set version to ${next} [skip ci]"
+          git commit -m "chore(release): set version to ${next}"
           git push origin "HEAD:${HEAD_REF}"
